@@ -86,6 +86,10 @@ public class DroneNetworkManager : MonoBehaviour
     // isFlying: Drone'un motorları çalışıyor mu? Sorusunun cevabı. True (Evet) veya False (Hayır).
     private bool isFlying = false;      
 
+    [Header("Rota Önizleme Ayarları")]
+    public LineRenderer routeLine; // Çizgiyi çizecek alet
+    public bool waitForInputToFly = true; // Boşluk tuşunu bekleyelim mi?
+
     // --- 6. OYUN MOTORU METOTLARI ---
 
     // Start(): Unity'de "Play" tuşuna bastığın ilk saniye, sahne yüklenirken sadece ve sadece 1 KERE çalışır. Hazırlık aşamasıdır.
@@ -104,6 +108,21 @@ public class DroneNetworkManager : MonoBehaviour
     // Update(): Unity oyun motorunun kalbidir. Oyun oynandığı sürece bilgisayarının hızına göre saniyede ortalama 60-144 kere arka arkaya çalışır. Frame (Kare) yenilenme yeridir.
     void Update()
     {
+        // 1. BOŞLUK TUŞU KONTROLÜ (BEKLEME MODU)
+        if (!isFlying && currentRoute != null && currentRoute.Count > 0)
+        {
+            // Eğer boşluk tuşuna basılırsa
+            if (Input.GetKeyDown(KeyCode.Space))
+            {
+                isFlying = true; // Uçuş şalterini aç
+                Debug.Log("Motorlar ateşlendi, uçuş başladı!");
+            }
+            else
+            {
+                // Eğer şalter inikse ve boşluğa basılmadıysa aşağıdaki uçuş matematiğine girme!
+                return; 
+            }
+        }
         // 1. KONTROL: Eğer uçuş şalteri inikse (false), drone objemiz yuvaya konmamışsa veya rotamız boşsa kodu burada durdur (return). Aşağıdaki uçuş matematiğine hiç girme.
         if (!isFlying || myDrone == null || currentRoute == null || currentRoute.Count == 0) return;
 
@@ -205,9 +224,27 @@ public class DroneNetworkManager : MonoBehaviour
 
             myDrone.GetComponent<TrailRenderer>().Clear(); // Drone'un altından çıkan izlerin (Trail) temizlenmesi. Böylece önceki rotanın izleri yeni rotada görünmez.
             
-            // Motorları çalıştır (Update döngüsündeki kilit açılır).
-            isFlying = true; 
-            Debug.Log("Otonom Uçuş Başlatıldı!");
+            // ROTAYI ÇİZGİ OLARAK ÇİZ
+            if (routeLine != null)
+            {
+                routeLine.positionCount = currentRoute.Count; // Nokta sayısını ayarla
+                routeLine.SetPositions(currentRoute.ToArray()); // Koordinatları ver
+            }
+
+            // MOTORLARI BEKLEMEYE AL
+            if (waitForInputToFly)
+            {
+                isFlying = false; // Şalteri kapalı tut
+                Debug.Log("Rota çizildi! Uçuşu başlatmak için BOŞLUK (Space) tuşuna basın.");
+            }
+            else
+            {
+                isFlying = true; 
+                Debug.Log("Otonom Uçuş Başlatıldı!");
+            }
+            // // Motorları çalıştır (Update döngüsündeki kilit açılır).
+            // isFlying = true; 
+            // Debug.Log("Otonom Uçuş Başlatıldı!");
         }
     }
 
