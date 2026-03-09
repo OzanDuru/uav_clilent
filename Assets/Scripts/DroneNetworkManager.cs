@@ -10,6 +10,8 @@ using System.Text;
 // UnityEngine: Unity oyun motorunun ana kütüphanesidir. 3D objeler, vektörler, zaman (Time) gibi tüm oyun motoru yeteneklerini buradan alırız.
 using UnityEngine; 
 
+using TMPro;// TextMeshPro: Unity'nin gelişmiş metin çizim sistemi. Ekrana yazı yazmak için kullanacağız.           
+
 // --- 2. İŞLETİM SİSTEMİ KONTROLÜ (ÖNİŞLEMCİ DİREKTİFLERİ) ---
 // Bu kod derleyiciye (oyunu paketleyen sisteme) şu emri verir: 
 // "Eğer bu oyunu Mac (OSX) veya Linux için paketliyorsan, System.Net kütüphanesini de koda dahil et. 
@@ -36,7 +38,8 @@ public class PointData
 public class PathResponseMessage 
 { 
     public string type;            // Gelen mesajın tipi (Örn: "GLOBAL_PATH")
-    public int mapSize;            // Haritanın boyutu
+    public int mapSize;   
+    public float totalCost;         // Haritanın boyutu
     public List<PointData> points; // İçinde birden fazla PointData (Şehir) barındıran tren katarı (Liste)
 }
 
@@ -89,6 +92,9 @@ public class DroneNetworkManager : MonoBehaviour
     [Header("Rota Önizleme Ayarları")]
     public LineRenderer routeLine; // Çizgiyi çizecek alet
     public bool waitForInputToFly = true; // Boşluk tuşunu bekleyelim mi?
+
+    [Header("UI (Arayüz) Ayarları")]
+    public TextMeshProUGUI costText; // <-- Ekrana yazdıracağımız metin kutusu
 
     // --- 6. OYUN MOTORU METOTLARI ---
 
@@ -195,6 +201,12 @@ public class DroneNetworkManager : MonoBehaviour
         // Eğer çeviri başarılı olduysa ve içinde gerçekten şehirler (points) varsa:
         if (responseObj != null && responseObj.points != null)
         {
+            // Eğer ekranda bir metin kutusu seçiliyse, Cost değerini yazdır
+            if (costText != null)
+            {
+                // .ToString("F2") kısmı, sayının virgülden sonra sadece 2 hanesini gösterir (Örn: 7548.99)
+                costText.text = "Total Cost: " + responseObj.totalCost.ToString("F2") + "units";
+            }
             SpawnPoints(responseObj.points);         // Yerdeki silindirleri çiz.
             PrepareFlightRoute(responseObj.points);  // Drone'un havada gezeceği görünmez yolları (rotayı) hesapla.
         }
