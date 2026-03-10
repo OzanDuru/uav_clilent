@@ -75,6 +75,11 @@ public class DroneNetworkManager : MonoBehaviour
     public float flightAltitude = 15f;// Drone yerden kaç metre yüksekte (irtifada) uçacak?
     public float arrivalThreshold = 0.5f; // "Hedefe vardım" demek için hedefe ne kadar yaklaşmamız yeterli? (Kusursuz 0.00'ı tutturmak imkansızdır).
 
+    public TextMeshProUGUI currentCostText; // Sarı UI metni
+    private float flownDistance = 0f;
+    private Vector3 lastPosition;
+    private float distanceMultiplier = 1f; // Hesaplanacak çarpan
+
     // --- 5. ARKA PLAN SİSTEMLERİ (BELLEK VE ŞALTERLER) ---
     // private: Unity arayüzünde GÖRÜNMEZ. Sadece bu kodun kendi içinde kullanacağı arka plan hafızasıdır.
     private Socket activeSocket; // Telefon ahizemiz. Python ile olan canlı bağlantıyı oyun boyunca burada tutacağız.
@@ -82,6 +87,7 @@ public class DroneNetworkManager : MonoBehaviour
     
     // currentRoute: Drone'un beynine yükleyeceğimiz "Uçuş Rotası". İçinde 3 boyutlu GPS koordinatları (Vector3) barındırır.
     private List<Vector3> currentRoute = new List<Vector3>(); 
+    private float targetTotalCost = 0f; // Python'dan gelen asıl skoru oyun sonu için aklımızda tutalım
 
     // currentTargetIndex: Rota listesindeki kaçıncı şehre gittiğimizi aklımızda tuttuğumuz parmak hesabı (0, 1, 2...).
     private int currentTargetIndex = 0; 
@@ -122,6 +128,8 @@ public class DroneNetworkManager : MonoBehaviour
             {
                 isFlying = true; // Uçuş şalterini aç
                 Debug.Log("Motorlar ateşlendi, uçuş başladı!");
+                lastPosition = myDrone.position; // Kalkış noktasını kaydet
+                flownDistance = 0f;              // Taksimetreyi sıfırla
             }
             else
             {
@@ -142,6 +150,12 @@ public class DroneNetworkManager : MonoBehaviour
         
         // MoveTowards: Bir noktadan (mevcut konum), diğer bir noktaya (hedef), belirli bir adım büyüklüğünde (step) ilerlemenin Unity'deki matematiksel formülüdür.
         myDrone.position = Vector3.MoveTowards(myDrone.position, targetPosition, step);
+        // --- TAKSİMETRE MATEMATİĞİ ---
+        float frameDist = Vector3.Distance(myDrone.position, lastPosition);
+        flownDistance += (frameDist * distanceMultiplier); // Çarpanla büyüt
+        lastPosition = myDrone.position;
+
+        if (currentCostText != null) currentCostText.text = "Current Cost: " + flownDistance.ToString("F2") + "m";
 
         // 4. ROTASYON (DÖNÜŞ): Drone'un ön burnunu milimetrik olarak gideceği noktaya (targetPosition) doğru çevir. Yengeç gibi yan yan uçmasını engeller.
         //myDrone.LookAt(targetPosition);
@@ -158,7 +172,7 @@ public class DroneNetworkManager : MonoBehaviour
                 targetRot,
                 turnSpeed * Time.deltaTime // bu frame’de dönebileceği max derece
             );
-}
+        }
 
         // 5. VARIŞ KONTROLÜ (PİSAGOR TEOREMİ)
         // Vector3.Distance: İki nokta (drone konumu ile hedef konumu) arasındaki kuş uçuşu mesafeyi (uzaklığı) ölçer.
@@ -175,9 +189,11 @@ public class DroneNetworkManager : MonoBehaviour
             // Eğer sayacımız, rotadaki toplam şehir sayısına ulaştıysa veya geçtiyse, gidecek yol kalmamıştır.
             if (currentTargetIndex >= currentRoute.Count)
             {
-                // Motorları kapat ve durdur.
-                isFlying = false;
+                isFlying = false; // Motorlar durur
                 Debug.Log("GÖREV TAMAMLANDI! Drone tüm rotayı gezdi.");
+                
+                // --- İŞTE BU SATIRI EKLE (FİNAL EŞİTLEMESİ) ---
+                if (currentCostText != null) currentCostText.text = "Current Cost: " + targetTotalCost.ToString("F2") + "m";
             }
         }
     }
@@ -205,14 +221,16 @@ public class DroneNetworkManager : MonoBehaviour
             if (costText != null)
             {
                 // .ToString("F2") kısmı, sayının virgülden sonra sadece 2 hanesini gösterir (Örn: 7548.99)
-                costText.text = "Total Cost: " + responseObj.totalCost.ToString("F2") + "units";
+                costText.text = "Total Cost: " + responseObj.totalCost.ToString("F2") + "m";
             }
             SpawnPoints(responseObj.points);         // Yerdeki silindirleri çiz.
-            PrepareFlightRoute(responseObj.points);  // Drone'un havada gezeceği görünmez yolları (rotayı) hesapla.
+            targetTotalCost = responseObj.totalCost;
+            PrepareFlightRoute(responseObj.points, responseObj.totalCost);  // DÜZELTME: totalCost parametre olarak gönderiliyor.
         }
     }
 
-    void PrepareFlightRoute(List<PointData> orderedPoints)
+    // DÜZELTME: Fonksiyona "float totalCost" parametresi eklendi.
+    void PrepareFlightRoute(List<PointData> orderedPoints, float totalCost)
     {
         // Eski bir uçuş planı varsa beyni temizle.
         currentRoute.Clear(); 
@@ -229,6 +247,8 @@ public class DroneNetworkManager : MonoBehaviour
         // Eğer seyir defterinde en az 1 nokta varsa uçuş prosedürünü başlat:
         if (currentRoute.Count > 0)
         {
+            // DÜZELTME: Oyunu sonsuz döngüye sokan "ReceiveMessageFromPython" çağrıları buradan silindi!
+
             currentTargetIndex = 0; // İlk hedefe odaklan.
             
             // Oyunu başlatır başlatmaz drone'u yavaşça yerden kaldırmak yerine, direkt rotanın ilk noktasında havaya ışınlıyoruz (Teleport).
@@ -254,9 +274,16 @@ public class DroneNetworkManager : MonoBehaviour
                 isFlying = true; 
                 Debug.Log("Otonom Uçuş Başlatıldı!");
             }
-            // // Motorları çalıştır (Update döngüsündeki kilit açılır).
-            // isFlying = true; 
-            // Debug.Log("Otonom Uçuş Başlatıldı!");
+            
+            // SİHİRLİ ÇARPAN HESAPLAMASI
+            float physicalDist = 0f;
+            for (int i = 0; i < currentRoute.Count - 1; i++) physicalDist += Vector3.Distance(currentRoute[i], currentRoute[i + 1]);
+            
+            // Python'dan gelen orijinal Cost'u, Unity'deki mesafeye bölüyoruz. (DÜZELTME: Parametre olan totalCost kullanıldı).
+            if (physicalDist > 0.01f) distanceMultiplier = totalCost / physicalDist;
+                // // Motorları çalıştır (Update döngüsündeki kilit açılır).
+                // isFlying = true; 
+                // Debug.Log("Otonom Uçuş Başlatıldı!");
         }
     }
 
@@ -337,18 +364,34 @@ public class DroneNetworkManager : MonoBehaviour
 
     void SpawnPoints(List<PointData> points)
     {
-        // Ekranda daha önceden kalma silindirler varsa, üst üste binmesinler diye önce eskileri sahnede yok et (Destroy).
+        // Önceki izleri temizle
         foreach (var go in spawned) { if (go) Destroy(go); }
-        spawned.Clear(); // Çöpçü listesini temizle.
+        spawned.Clear(); 
 
-        // Yeni gelen noktaları tek tek sahneye bas (Instantiate).
         foreach (var p in points)
         {
-            Vector3 pos = new Vector3(p.x * uniformScale, yHeight, p.z * uniformScale);
-            // Instantiate (Neyi Çizeyim, Nereye Çizeyim, Dönüş Açısı Ne Olsun, Kimin Altında Dursun)
-            var go = Instantiate(cylinderPrefab, pos, Quaternion.identity, this.transform);
-            go.name = $"Hedef_{p.id}"; // Objenin adını belirle.
-            spawned.Add(go); // İleride silebilmek için çöpçü listesine ekle.
+            float targetX = p.x * uniformScale;
+            float targetZ = p.z * uniformScale;
+
+            // 1. Arazinin o noktadaki tam yüksekliğini ölç
+            float terrainY = Terrain.activeTerrain.SampleHeight(new Vector3(targetX, 0f, targetZ));
+
+            // 2. Silindirin Boyu: Uzaktan rahatça görünsün diye boyunu 40 yapıyoruz (İstersen değiştirebilirsin)
+            float myCylinderHeight = 40f; 
+
+            // 3. Mükemmel Hizalama: Silindirin merkezi tam ortada olduğu için, yere gömülmemesi adına onu boyunun yarısı kadar (myCylinderHeight) yukarı kaldırıyoruz.
+            float finalY = terrainY + myCylinderHeight; 
+
+            Vector3 finalPos = new Vector3(targetX, finalY, targetZ);
+
+            // 4. Silindiri yarat
+            var go = Instantiate(cylinderPrefab, finalPos, Quaternion.identity, this.transform);
+            
+            // 5. Boyunu ayarla (X ve Z aynı kalıyor, Y ekseninde uzatıyoruz)
+            go.transform.localScale = new Vector3(go.transform.localScale.x, myCylinderHeight, go.transform.localScale.z);
+
+            go.name = $"Hedef_{p.id}"; 
+            spawned.Add(go); 
         }
     }
 
@@ -362,5 +405,25 @@ public class DroneNetworkManager : MonoBehaviour
             activeSocket.Close();
             Debug.Log("Soket güvenli bir şekilde kapatıldı.");
         }
+    }
+
+    // --- 10. SİMÜLASYON HIZ KONTROLÜ (UI BUTONLARI İÇİN) ---
+
+    public void SetSpeedNormal()
+    {
+        Time.timeScale = 1f; // Normal Zaman
+        Debug.Log("Simülasyon Hızı: 1x (Normal)");
+    }
+
+    public void SetSpeedFast()
+    {
+        Time.timeScale = 2f; // 2 Kat Hızlı
+        Debug.Log("Simülasyon Hızı: 2x (Hızlı)");
+    }
+
+    public void SetSpeedVeryFast()
+    {
+        Time.timeScale = 4f; // 4 Kat Hızlı
+        Debug.Log("Simülasyon Hızı: 4x (Çok Hızlı)");
     }
 }
