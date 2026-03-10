@@ -102,6 +102,9 @@ public class DroneNetworkManager : MonoBehaviour
     [Header("UI (Arayüz) Ayarları")]
     public TextMeshProUGUI costText; // <-- Ekrana yazdıracağımız metin kutusu
 
+    [Header("Görsel Ayarlar")]
+    public float cylinderHeight = 40f; // Silindirlerin varsayılan boyu
+
     // --- 6. OYUN MOTORU METOTLARI ---
 
     // Start(): Unity'de "Play" tuşuna bastığın ilk saniye, sahne yüklenirken sadece ve sadece 1 KERE çalışır. Hazırlık aşamasıdır.
@@ -377,10 +380,11 @@ public class DroneNetworkManager : MonoBehaviour
             float terrainY = Terrain.activeTerrain.SampleHeight(new Vector3(targetX, 0f, targetZ));
 
             // 2. Silindirin Boyu: Uzaktan rahatça görünsün diye boyunu 40 yapıyoruz (İstersen değiştirebilirsin)
-            float myCylinderHeight = 40f; 
+            // float myCylinderHeight = 40f; 
 
             // 3. Mükemmel Hizalama: Silindirin merkezi tam ortada olduğu için, yere gömülmemesi adına onu boyunun yarısı kadar (myCylinderHeight) yukarı kaldırıyoruz.
-            float finalY = terrainY + myCylinderHeight; 
+            float finalY = terrainY + cylinderHeight;
+
 
             Vector3 finalPos = new Vector3(targetX, finalY, targetZ);
 
@@ -388,7 +392,7 @@ public class DroneNetworkManager : MonoBehaviour
             var go = Instantiate(cylinderPrefab, finalPos, Quaternion.identity, this.transform);
             
             // 5. Boyunu ayarla (X ve Z aynı kalıyor, Y ekseninde uzatıyoruz)
-            go.transform.localScale = new Vector3(go.transform.localScale.x, myCylinderHeight, go.transform.localScale.z);
+            go.transform.localScale = new Vector3(go.transform.localScale.x, cylinderHeight, go.transform.localScale.z);
 
             go.name = $"Hedef_{p.id}"; 
             spawned.Add(go); 
@@ -408,7 +412,11 @@ public class DroneNetworkManager : MonoBehaviour
     }
 
     // --- 10. SİMÜLASYON HIZ KONTROLÜ (UI BUTONLARI İÇİN) ---
-
+     public void SetSpeedSlow()
+    {
+        Time.timeScale = 0.25f; // Yarı Hızlı
+        Debug.Log("Simülasyon Hızı: 0.25x (Yarı Hızlı)");
+    }
     public void SetSpeedNormal()
     {
         Time.timeScale = 1f; // Normal Zaman
@@ -425,5 +433,41 @@ public class DroneNetworkManager : MonoBehaviour
     {
         Time.timeScale = 4f; // 4 Kat Hızlı
         Debug.Log("Simülasyon Hızı: 4x (Çok Hızlı)");
+    }
+
+    // --- 11. SİLİNDİR BOYU KONTROLÜ (UI BUTONLARI İÇİN) ---
+
+    public void IncreaseCylinderHeight()
+    {
+        cylinderHeight += 1f; // Boyu 1 birim artır
+        UpdateAllCylinders();
+    }
+
+    public void DecreaseCylinderHeight()
+    {
+        cylinderHeight -= 1f; // Boyu 1 birim kısalt
+        if (cylinderHeight < 0.2f) cylinderHeight = 0.2f; // Yerin altına girmesini ve eksiye düşmesini engelle
+        UpdateAllCylinders();
+    }
+
+    // Sahnedeki tüm silindirleri bulup boylarını ve konumlarını yeni değere göre güncelleyen arka plan işçisi:
+    private void UpdateAllCylinders()
+    {
+        foreach (var go in spawned)
+        {
+            if (go != null)
+            {
+                // Mevcut X ve Z konumunu al
+                float x = go.transform.position.x;
+                float z = go.transform.position.z;
+                
+                // Arazinin yüksekliğini tekrar ölç (Çünkü engebeli bir arazi)
+                float terrainY = Terrain.activeTerrain.SampleHeight(new Vector3(x, 0f, z));
+                
+                // Hem pozisyonu hem de boyu yeni cylinderHeight değerine göre güncelle
+                go.transform.position = new Vector3(x, terrainY + cylinderHeight, z);
+                go.transform.localScale = new Vector3(go.transform.localScale.x, cylinderHeight, go.transform.localScale.z);
+            }
+        }
     }
 }
