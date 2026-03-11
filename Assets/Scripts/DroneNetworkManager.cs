@@ -105,6 +105,11 @@ public class DroneNetworkManager : MonoBehaviour
     [Header("Görsel Ayarlar")]
     public float cylinderHeight = 40f; // Silindirlerin varsayılan boyu
 
+
+    [Header("Sensör (Radar) Ayarları")]
+    public float radarDistance = 150f; 
+    public float safeCorridorWidth = 4f; // Uçağın merkezinden sağa ve sola olan toplam tehlike genişliği (Örn: 15 metre)
+
     // --- 6. OYUN MOTORU METOTLARI ---
 
     // Start(): Unity'de "Play" tuşuna bastığın ilk saniye, sahne yüklenirken sadece ve sadece 1 KERE çalışır. Hazırlık aşamasıdır.
@@ -180,7 +185,54 @@ public class DroneNetworkManager : MonoBehaviour
         // 5. VARIŞ KONTROLÜ (PİSAGOR TEOREMİ)
         // Vector3.Distance: İki nokta (drone konumu ile hedef konumu) arasındaki kuş uçuşu mesafeyi (uzaklığı) ölçer.
         float distanceToTarget = Vector3.Distance(myDrone.position, targetPosition);
+        // --- GELİŞMİŞ LiDAR RADARI (YELPAZE TARAMA) ---
+        
+       // --- GELİŞMİŞ LiDAR RADARI (YELPAZE TARAMA + KORİDOR FİLTRESİ) ---
+        
+        bool tehlikeliEngelVar = false; 
+        
+        float[] radarAngles = { -30f, -15f, 0f, 15f, 30f }; 
 
+        foreach (float angle in radarAngles)
+        {
+            Vector3 rayDirection = Quaternion.Euler(0, angle, 0) * myDrone.forward;
+            Debug.DrawRay(myDrone.position, rayDirection * radarDistance, Color.cyan); // Taramayı mavi çiz
+
+            RaycastHit hit;
+            if (Physics.Raycast(myDrone.position, rayDirection, out hit, radarDistance))
+            {
+                if (!hit.collider.gameObject.name.Contains("Hedef"))
+                {
+                    // --- SİHİRLİ MATEMATİK (Lateral Distance) ---
+                    // Çarpan lazerin uçağın merkez rotasına olan DİKEY (yanal) uzaklığını hesaplıyoruz.
+                    float angleRad = Mathf.Abs(angle) * Mathf.Deg2Rad; // Unity Sinüs için Radyan ister
+                    float lateralDistance = hit.distance * Mathf.Sin(angleRad);
+
+                    // EĞER ÇARPAN ENGEL BİZİM GÜVENLİ KORİDORUMUZUN İÇİNDEYSE (Çarpışma Kesinse!):
+                    if (lateralDistance <= safeCorridorWidth)
+                    {
+                        tehlikeliEngelVar = true; 
+                        
+                        // Tehlikeli engeli SARI çiz
+                        Debug.DrawLine(myDrone.position, hit.point, Color.yellow);
+                        Debug.LogWarning($"⚠️ KESİN ÇARPIŞMA ROTASI! {angle} derecede, {hit.distance:F1}m ötede. (Yanal Mesafe: {lateralDistance:F1}m <= {safeCorridorWidth}m)");
+                    }
+                    else
+                    {
+                        // ENGELİ GÖRDÜK AMA BİZE ÇARPMADAN YANDAN GEÇİP GİDECEK (Teğet geçecek)
+                        // RRT* çalıştırmaya gerek yok, zararsız engeli YEŞİL çiz.
+                        Debug.DrawLine(myDrone.position, hit.point, Color.green);
+                    }
+                }
+            }
+        }
+
+        // --- GERÇEK ACİL DURUM ---
+        if (tehlikeliEngelVar)
+        {
+            // İLERİDE BURAYA: Sadece koridorun içindeki gerçek tehditler için Python RRT*'ı tetikleyeceğiz.
+            // Debug.LogError("PYTHON'A ACİL RRT* İSTEĞİ GÖNDERİLİYOR!");
+        }
         // Eğer aramızdaki mesafe, bizim belirlediğimiz eşikten (0.5 metre) daha küçükse:
         if (distanceToTarget < arrivalThreshold)
         {
