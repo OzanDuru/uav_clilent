@@ -49,6 +49,18 @@ public class PathRequestMessage
     public string type;            // Bizim Python'a göndereceğimiz isteğin tipi (Örn: "GET_GLOBAL_PATH")
 }
 
+[Serializable]
+public class EmergencyReplanMessage
+{
+    public string type;     // "EMERGENCY_REPLAN"
+    public float currentX;  // Drone'un o anki X konumu
+    public float currentZ;  // Drone'un o anki Z konumu
+    public float targetX;   // Şu anda gidilen hedefin X konumu
+    public float targetZ;   // Şu anda gidilen hedefin Z konumu
+    public float obstacleX; // Tehlikeli engelin X konumu
+    public float obstacleZ; // Tehlikeli engelin Z konumu
+}
+
 
 // --- 4. ANA OYUN SINIFI (Unity'deki Objemize Bağlanacak Olan Script) ---
 // MonoBehaviour: Unity'deki her script'in atasıdır. Bu sayede kodumuz Unity arayüzüne eklenebilir, Start ve Update gibi oyun motoru olaylarını dinleyebilir.
@@ -78,7 +90,7 @@ public class DroneNetworkManager : MonoBehaviour
     public TextMeshProUGUI currentCostText; // Sarı UI metni
     private float flownDistance = 0f;
     private Vector3 lastPosition;
-    private float distanceMultiplier = 1f; // Hesaplanacak çarpan
+    private float currentSpeed;
 
     // --- 5. ARKA PLAN SİSTEMLERİ (BELLEK VE ŞALTERLER) ---
     // private: Unity arayüzünde GÖRÜNMEZ. Sadece bu kodun kendi içinde kullanacağı arka plan hafızasıdır.
@@ -109,12 +121,17 @@ public class DroneNetworkManager : MonoBehaviour
     [Header("Sensör (Radar) Ayarları")]
     public float radarDistance = 150f; 
     public float safeCorridorWidth = 4f; // Uçağın merkezinden sağa ve sola olan toplam tehlike genişliği (Örn: 15 metre)
+    private bool isReplanning = false; // Python'dan cevap gelene kadar tekrar istek yollamayalım
+    private float defaultDroneSpeed;
+    private float evasionCooldown = 0f; // Kaçış manevrası sonrası sensörü kısa süreliğine kör eder
 
     // --- 6. OYUN MOTORU METOTLARI ---
 
     // Start(): Unity'de "Play" tuşuna bastığın ilk saniye, sahne yüklenirken sadece ve sadece 1 KERE çalışır. Hazırlık aşamasıdır.
     void Start()
     {
+        defaultDroneSpeed = droneSpeed;
+        currentSpeed = droneSpeed;
         ConnectToPython(); // 1. Adım: Telefonu kaldırıp Python'u ara.
         
         // 2. Adım: Eğer telefon açıldıysa (Socket null değilse ve bağlandıysa)
@@ -147,91 +164,120 @@ public class DroneNetworkManager : MonoBehaviour
         }
         // 1. KONTROL: Eğer uçuş şalteri inikse (false), drone objemiz yuvaya konmamışsa veya rotamız boşsa kodu burada durdur (return). Aşağıdaki uçuş matematiğine hiç girme.
         if (!isFlying || myDrone == null || currentRoute == null || currentRoute.Count == 0) return;
+        if (evasionCooldown > 0f) { evasionCooldown -= Time.deltaTime; }
 
         // 2. HEDEFİ SEÇME: Listeden (currentRoute) sıradaki hedefimizin 3D koordinatlarını alıyoruz.
         Vector3 targetPosition = currentRoute[currentTargetIndex];
+        float targetSpeed = droneSpeed;
 
         // 3. HAREKET MATEMATİĞİ (En Önemli Kısım)
         // Time.deltaTime: Bir önceki ekran karesinden bu kareye geçene kadar geçen küsuratlı süredir. 
         // Hızı bununla çarparak, donanımdan bağımsız "saniyede 20 birim" hız elde ederiz. Aksi takdirde güçlü bilgisayarda drone mermi gibi uçar.
-        float step = droneSpeed * Time.deltaTime;
-        
-        // MoveTowards: Bir noktadan (mevcut konum), diğer bir noktaya (hedef), belirli bir adım büyüklüğünde (step) ilerlemenin Unity'deki matematiksel formülüdür.
-        myDrone.position = Vector3.MoveTowards(myDrone.position, targetPosition, step);
-        // --- TAKSİMETRE MATEMATİĞİ ---
-        float frameDist = Vector3.Distance(myDrone.position, lastPosition);
-        flownDistance += (frameDist * distanceMultiplier); // Çarpanla büyüt
-        lastPosition = myDrone.position;
-
-        if (currentCostText != null) currentCostText.text = "Current Cost: " + flownDistance.ToString("F2") + "m";
-
-        // 4. ROTASYON (DÖNÜŞ): Drone'un ön burnunu milimetrik olarak gideceği noktaya (targetPosition) doğru çevir. Yengeç gibi yan yan uçmasını engeller.
-        //myDrone.LookAt(targetPosition);
-        // 4. ROTASYON (DÖNÜŞ) - Smooth / Yavaş dönüş
-        Vector3 dir = (targetPosition - myDrone.position);
-        dir.y = 0f; // İstersen drone sadece yatay düzlemde dönsün (pitch yapmasın)
-
-        if (dir.sqrMagnitude > 0.0001f) // sıfır vektör hatasını önle
-        {
-            Quaternion targetRot = Quaternion.LookRotation(dir.normalized, Vector3.up);
-
-            myDrone.rotation = Quaternion.RotateTowards(
-                myDrone.rotation,
-                targetRot,
-                turnSpeed * Time.deltaTime // bu frame’de dönebileceği max derece
-            );
-        }
-
-        // 5. VARIŞ KONTROLÜ (PİSAGOR TEOREMİ)
-        // Vector3.Distance: İki nokta (drone konumu ile hedef konumu) arasındaki kuş uçuşu mesafeyi (uzaklığı) ölçer.
-        float distanceToTarget = Vector3.Distance(myDrone.position, targetPosition);
         // --- GELİŞMİŞ LiDAR RADARI (YELPAZE TARAMA) ---
         
        // --- GELİŞMİŞ LiDAR RADARI (YELPAZE TARAMA + KORİDOR FİLTRESİ) ---
         
         bool tehlikeliEngelVar = false; 
+        Vector3 dangerousObstaclePoint = Vector3.zero;
         
         float[] radarAngles = { -30f, -15f, 0f, 15f, 30f }; 
 
-        foreach (float angle in radarAngles)
+        if (evasionCooldown <= 0f && !isReplanning)
         {
-            Vector3 rayDirection = Quaternion.Euler(0, angle, 0) * myDrone.forward;
-            Debug.DrawRay(myDrone.position, rayDirection * radarDistance, Color.cyan); // Taramayı mavi çiz
-
-            RaycastHit hit;
-            if (Physics.Raycast(myDrone.position, rayDirection, out hit, radarDistance))
+            foreach (float angle in radarAngles)
             {
-                if (!hit.collider.gameObject.name.Contains("Hedef"))
-                {
-                    // --- SİHİRLİ MATEMATİK (Lateral Distance) ---
-                    // Çarpan lazerin uçağın merkez rotasına olan DİKEY (yanal) uzaklığını hesaplıyoruz.
-                    float angleRad = Mathf.Abs(angle) * Mathf.Deg2Rad; // Unity Sinüs için Radyan ister
-                    float lateralDistance = hit.distance * Mathf.Sin(angleRad);
+                Vector3 rayDirection = Quaternion.Euler(0, angle, 0) * myDrone.forward;
+                Debug.DrawRay(myDrone.position, rayDirection * radarDistance, Color.cyan); // Taramayı mavi çiz
 
-                    // EĞER ÇARPAN ENGEL BİZİM GÜVENLİ KORİDORUMUZUN İÇİNDEYSE (Çarpışma Kesinse!):
-                    if (lateralDistance <= safeCorridorWidth)
+                RaycastHit hit;
+                if (Physics.Raycast(myDrone.position, rayDirection, out hit, radarDistance))
+                {
+                    if (!hit.collider.gameObject.name.Contains("Hedef"))
                     {
-                        tehlikeliEngelVar = true; 
-                        
-                        // Tehlikeli engeli SARI çiz
-                        Debug.DrawLine(myDrone.position, hit.point, Color.yellow);
-                        Debug.LogWarning($"⚠️ KESİN ÇARPIŞMA ROTASI! {angle} derecede, {hit.distance:F1}m ötede. (Yanal Mesafe: {lateralDistance:F1}m <= {safeCorridorWidth}m)");
-                    }
-                    else
-                    {
-                        // ENGELİ GÖRDÜK AMA BİZE ÇARPMADAN YANDAN GEÇİP GİDECEK (Teğet geçecek)
-                        // RRT* çalıştırmaya gerek yok, zararsız engeli YEŞİL çiz.
-                        Debug.DrawLine(myDrone.position, hit.point, Color.green);
+                        // --- SİHİRLİ MATEMATİK (Lateral Distance) ---
+                        // Çarpan lazerin uçağın merkez rotasına olan DİKEY (yanal) uzaklığını hesaplıyoruz.
+                        float angleRad = Mathf.Abs(angle) * Mathf.Deg2Rad; // Unity Sinüs için Radyan ister
+                        float lateralDistance = hit.distance * Mathf.Sin(angleRad);
+
+                        if (hit.distance < 30f)
+                        {
+                            targetSpeed = defaultDroneSpeed * 0.4f; // Tehlikeye fazla yaklaşıldıysa sert fren
+                        }
+
+                        // EĞER ÇARPAN ENGEL BİZİM GÜVENLİ KORİDORUMUZUN İÇİNDEYSE (Çarpışma Kesinse!):
+                        if (lateralDistance <= safeCorridorWidth)
+                        {
+                            tehlikeliEngelVar = true; 
+                            dangerousObstaclePoint = hit.point;
+                            
+                            // Tehlikeli engeli SARI çiz
+                            Debug.DrawLine(myDrone.position, hit.point, Color.yellow);
+                            Debug.LogWarning($"⚠️ KESİN ÇARPIŞMA ROTASI! {angle} derecede, {hit.distance:F1}m ötede. (Yanal Mesafe: {lateralDistance:F1}m <= {safeCorridorWidth}m)");
+                            break;
+                        }
+                        else
+                        {
+                            // ENGELİ GÖRDÜK AMA BİZE ÇARPMADAN YANDAN GEÇİP GİDECEK (Teğet geçecek)
+                            // RRT* çalıştırmaya gerek yok, zararsız engeli YEŞİL çiz.
+                            Debug.DrawLine(myDrone.position, hit.point, Color.green);
+                        }
                     }
                 }
             }
         }
 
+        currentSpeed = Mathf.Lerp(currentSpeed, targetSpeed, Time.deltaTime * 3f);
+        float step = currentSpeed * Time.deltaTime;
+        
+        // 1. Hedefin sadece X ve Z'sine doğru git; yükseklik ayrı bir terrain-following katmanında çözülecek.
+        Vector3 horizontalTarget = new Vector3(targetPosition.x, myDrone.position.y, targetPosition.z);
+        myDrone.position = Vector3.MoveTowards(myDrone.position, horizontalTarget, step);
+
+        // 2. Tam altımızdaki arazinin yüksekliğini ölçüp güvenli irtifayı hesaplıyoruz.
+        float currentTerrainY = Terrain.activeTerrain != null
+            ? Terrain.activeTerrain.SampleHeight(myDrone.position)
+            : 0f;
+        float targetAltitude = Mathf.Max(flightAltitude, currentTerrainY + 8f);
+
+        // 3. Y eksenini aniden zıplatmak yerine yumuşakça yeni irtifaya süzdürüyoruz.
+        float newY = Mathf.Lerp(myDrone.position.y, targetAltitude, Time.deltaTime * 2f);
+        myDrone.position = new Vector3(myDrone.position.x, newY, myDrone.position.z);
+
+        // Drone'un her frame'de gerçekten kat ettiği fiziksel mesafeyi topluyoruz.
+        flownDistance += Vector3.Distance(myDrone.position, lastPosition);
+        lastPosition = myDrone.position;
+
+        if (currentCostText != null) currentCostText.text = "Current Cost: " + flownDistance.ToString("F2") + "m";
+
+        // 4. ROTASYON (DÖNÜŞ) - Sabit kanatlı uçak gibi roll ve pitch ile banked turn yap.
+        Vector3 targetDir = targetPosition - myDrone.position;
+        Vector3 flatTargetDir = new Vector3(targetDir.x, 0f, targetDir.z);
+        Vector3 flatForward = new Vector3(myDrone.forward.x, 0f, myDrone.forward.z);
+
+        if (flatTargetDir.sqrMagnitude > 0.0001f && flatForward.sqrMagnitude > 0.0001f)
+        {
+            float turnAngle = Vector3.SignedAngle(flatForward.normalized, flatTargetDir.normalized, Vector3.up);
+            float targetRoll = Mathf.Clamp(-turnAngle * 1.5f, -40f, 40f);
+            float pitchAngle = Mathf.Clamp((targetPosition.y - myDrone.position.y) * 2f, -20f, 20f);
+
+            Quaternion yawRotation = Quaternion.LookRotation(flatTargetDir.normalized, Vector3.up);
+            Quaternion bankedRotation = yawRotation * Quaternion.Euler(pitchAngle, 0f, targetRoll);
+            myDrone.rotation = Quaternion.Slerp(myDrone.rotation, bankedRotation, Time.deltaTime * 2f);
+        }
+
+        // 5. VARIŞ KONTROLÜ
+        // Sabit kanatlı uçuşta hedefe erişimi yatay düzlemde değerlendiriyoruz; Y ekseni terrain-following tarafından ayrı yönetiliyor.
+        Vector2 currentXZ = new Vector2(myDrone.position.x, myDrone.position.z);
+        Vector2 targetXZ = new Vector2(targetPosition.x, targetPosition.z);
+        float distanceToTarget = Vector2.Distance(currentXZ, targetXZ);
+
         // --- GERÇEK ACİL DURUM ---
         if (tehlikeliEngelVar)
         {
-            // İLERİDE BURAYA: Sadece koridorun içindeki gerçek tehditler için Python RRT*'ı tetikleyeceğiz.
-            // Debug.LogError("PYTHON'A ACİL RRT* İSTEĞİ GÖNDERİLİYOR!");
+            if (!isReplanning)
+            {
+                RequestEmergencyPath(dangerousObstaclePoint);
+            }
         }
         // Eğer aramızdaki mesafe, bizim belirlediğimiz eşikten (0.5 metre) daha küçükse:
         if (distanceToTarget < arrivalThreshold)
@@ -240,16 +286,18 @@ public class DroneNetworkManager : MonoBehaviour
             
             // Sıradaki hedefe geçmek için sayacı 1 artır. (Örn: 0. şehirden 1. şehre geç)
             currentTargetIndex++; 
+        }
+        else if (distanceToTarget < 25f && tehlikeliEngelVar)
+        {
+            Debug.LogWarning($"Hedef {currentTargetIndex} ulaşılamaz görünüyor. Engel nedeniyle atlanıyor.");
+            currentTargetIndex++;
+        }
 
-            // Eğer sayacımız, rotadaki toplam şehir sayısına ulaştıysa veya geçtiyse, gidecek yol kalmamıştır.
-            if (currentTargetIndex >= currentRoute.Count)
-            {
-                isFlying = false; // Motorlar durur
-                Debug.Log("GÖREV TAMAMLANDI! Drone tüm rotayı gezdi.");
-                
-                // --- İŞTE BU SATIRI EKLE (FİNAL EŞİTLEMESİ) ---
-                if (currentCostText != null) currentCostText.text = "Current Cost: " + targetTotalCost.ToString("F2") + "m";
-            }
+        // Eğer sayacımız, rotadaki toplam şehir sayısına ulaştıysa veya geçtiyse, gidecek yol kalmamıştır.
+        if (currentTargetIndex >= currentRoute.Count)
+        {
+            isFlying = false; // Motorlar durur
+            Debug.Log("GÖREV TAMAMLANDI! Drone tüm rotayı gezdi.");
         }
     }
 
@@ -284,6 +332,53 @@ public class DroneNetworkManager : MonoBehaviour
         }
     }
 
+    void RequestEmergencyPath(Vector3 obstaclePoint)
+    {
+        if (activeSocket == null || !activeSocket.Connected || currentTargetIndex >= currentRoute.Count) return;
+
+        isReplanning = true;
+        droneSpeed = defaultDroneSpeed * 0.5f; // Yeni rota gelene kadar daha kontrollü ilerleyelim
+
+        try
+        {
+            Vector3 targetPosition = currentRoute[currentTargetIndex];
+            var request = new EmergencyReplanMessage
+            {
+                type = "EMERGENCY_REPLAN",
+                currentX = myDrone.position.x,
+                currentZ = myDrone.position.z,
+                targetX = targetPosition.x,
+                targetZ = targetPosition.z,
+                obstacleX = obstaclePoint.x,
+                obstacleZ = obstaclePoint.z
+            };
+
+            SendEmergencyMessageToPython(request);
+            string jsonResponse = ReceiveMessageFromPython();
+            var responseObj = JsonUtility.FromJson<PathResponseMessage>(jsonResponse);
+
+            if (responseObj != null && responseObj.points != null && responseObj.points.Count > 0)
+            {
+                InjectEmergencyRoute(responseObj.points);
+                evasionCooldown = 3.0f; // Yeni kaçış rotasına girmesi için sensörü kısa süreliğine devre dışı bırak
+                Debug.Log($"Python'dan {responseObj.points.Count} adet geçici kaçış noktası alındı.");
+            }
+            else
+            {
+                Debug.LogWarning("Python acil kaçış rotası döndürmedi. Mevcut rota korunuyor.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError("Acil yeniden planlama başarısız oldu: " + ex.Message);
+        }
+        finally
+        {
+            isReplanning = false;
+            droneSpeed = defaultDroneSpeed;
+        }
+    }
+
     // DÜZELTME: Fonksiyona "float totalCost" parametresi eklendi.
     void PrepareFlightRoute(List<PointData> orderedPoints, float totalCost)
     {
@@ -293,8 +388,14 @@ public class DroneNetworkManager : MonoBehaviour
         // Python'dan gelen her bir şehir için:
         foreach (var p in orderedPoints)
         {
-            // Şehrin tam tepesinde, bizim belirlediğimiz "flightAltitude" (Örn: 15 metre) yüksekliğinde 3 boyutlu yeni bir GPS noktası yarat.
-            Vector3 flightWaypoint = new Vector3(p.x * uniformScale, flightAltitude, p.z * uniformScale);
+            float worldX = p.x * uniformScale;
+            float worldZ = p.z * uniformScale;
+            // Spawn ve hedef şehirler hiçbir zaman dağın içinde kalmasın.
+            float terrainY = Terrain.activeTerrain != null
+                ? Terrain.activeTerrain.SampleHeight(new Vector3(worldX, 0f, worldZ))
+                : 0f;
+            float safeY = Mathf.Max(flightAltitude, terrainY + 5f);
+            Vector3 flightWaypoint = new Vector3(worldX, safeY, worldZ);
             // Bu uçuş noktasını drone'un seyir defterine ekle.
             currentRoute.Add(flightWaypoint);
         }
@@ -306,16 +407,24 @@ public class DroneNetworkManager : MonoBehaviour
 
             currentTargetIndex = 0; // İlk hedefe odaklan.
             
-            // Oyunu başlatır başlatmaz drone'u yavaşça yerden kaldırmak yerine, direkt rotanın ilk noktasında havaya ışınlıyoruz (Teleport).
-            myDrone.position = currentRoute[0]; 
+            // Sadece doğuş anında dağın içine gömülmeyi engelliyoruz. Sonraki ana rota noktaları sabit irtifada kalır.
+            Vector3 spawnPoint = currentRoute[0];
+            if (Terrain.activeTerrain != null)
+            {
+                float terrainY = Terrain.activeTerrain.SampleHeight(new Vector3(spawnPoint.x, 0f, spawnPoint.z));
+                if (spawnPoint.y < terrainY)
+                {
+                    spawnPoint = new Vector3(spawnPoint.x, terrainY + 5f, spawnPoint.z);
+                }
+            }
+            myDrone.position = spawnPoint;
 
             myDrone.GetComponent<TrailRenderer>().Clear(); // Drone'un altından çıkan izlerin (Trail) temizlenmesi. Böylece önceki rotanın izleri yeni rotada görünmez.
             
             // ROTAYI ÇİZGİ OLARAK ÇİZ
             if (routeLine != null)
             {
-                routeLine.positionCount = currentRoute.Count; // Nokta sayısını ayarla
-                routeLine.SetPositions(currentRoute.ToArray()); // Koordinatları ver
+                RefreshRouteLine();
             }
 
             // MOTORLARI BEKLEMEYE AL
@@ -330,16 +439,25 @@ public class DroneNetworkManager : MonoBehaviour
                 Debug.Log("Otonom Uçuş Başlatıldı!");
             }
             
-            // SİHİRLİ ÇARPAN HESAPLAMASI
-            float physicalDist = 0f;
-            for (int i = 0; i < currentRoute.Count - 1; i++) physicalDist += Vector3.Distance(currentRoute[i], currentRoute[i + 1]);
-            
-            // Python'dan gelen orijinal Cost'u, Unity'deki mesafeye bölüyoruz. (DÜZELTME: Parametre olan totalCost kullanıldı).
-            if (physicalDist > 0.01f) distanceMultiplier = totalCost / physicalDist;
-                // // Motorları çalıştır (Update döngüsündeki kilit açılır).
-                // isFlying = true; 
-                // Debug.Log("Otonom Uçuş Başlatıldı!");
         }
+    }
+
+    void InjectEmergencyRoute(List<PointData> detourPoints)
+    {
+        int insertIndex = Mathf.Clamp(currentTargetIndex, 0, currentRoute.Count);
+
+        foreach (var p in detourPoints)
+        {
+            // RRT* sadece yatay kaçış verir; yükseklik terrain-following katmanında yumuşakça ayarlanır.
+            Vector3 detourWaypoint = new Vector3(p.x, myDrone.position.y, p.z);
+            currentRoute.Insert(insertIndex, detourWaypoint);
+            insertIndex++;
+        }
+
+        // Hedef indexi aynı kalır; çünkü yeni noktalar mevcut hedefin önüne eklendi ve drone hemen ilk detour noktasına yönelir.
+        currentTargetIndex = Mathf.Clamp(currentTargetIndex, 0, currentRoute.Count - 1);
+
+        RefreshRouteLine();
     }
 
     // --- 8. AĞ (SOCKET) İLETİŞİM METOTLARI ---
@@ -380,6 +498,18 @@ public class DroneNetworkManager : MonoBehaviour
         byte[] lengthBytes = BitConverter.GetBytes((uint)jsonBytes.Length);
 
         // 4. Önce kargo fişini (boyutu), hemen ardından asıl kargoyu (json) boruya fırlat.
+        activeSocket.Send(lengthBytes);
+        activeSocket.Send(jsonBytes);
+    }
+
+    void SendEmergencyMessageToPython(EmergencyReplanMessage requestObj)
+    {
+        if (activeSocket == null || !activeSocket.Connected) return;
+
+        string json = JsonUtility.ToJson(requestObj);
+        byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
+        byte[] lengthBytes = BitConverter.GetBytes((uint)jsonBytes.Length);
+
         activeSocket.Send(lengthBytes);
         activeSocket.Send(jsonBytes);
     }
@@ -449,6 +579,14 @@ public class DroneNetworkManager : MonoBehaviour
             go.name = $"Hedef_{p.id}"; 
             spawned.Add(go); 
         }
+    }
+
+    void RefreshRouteLine()
+    {
+        if (routeLine == null) return;
+
+        routeLine.positionCount = currentRoute.Count;
+        routeLine.SetPositions(currentRoute.ToArray());
     }
 
     // OnDestroy(): Unity'de "Play" tuşuna tekrar basıp oyunu durdurduğunda otomatik çalışan çöpçü metodudur.
