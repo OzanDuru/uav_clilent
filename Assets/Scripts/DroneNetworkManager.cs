@@ -87,7 +87,12 @@ public class DroneNetworkManager : MonoBehaviour
     public float flightAltitude = 15f;// Drone yerden kaç metre yüksekte (irtifada) uçacak?
     public float arrivalThreshold = 0.5f; // "Hedefe vardım" demek için hedefe ne kadar yaklaşmamız yeterli? (Kusursuz 0.00'ı tutturmak imkansızdır).
 
-    public TextMeshProUGUI currentCostText; // Sarı UI metni
+    [Header("UI (Arayüz) Ayarları - TAKSİMETRE")]
+    public TextMeshProUGUI estimatedCostText; // Rotanın engelsiz ilk hesaplanan uzunluğu
+    public TextMeshProUGUI currentCostText;   // Anlık uçulan mesafe
+    public TextMeshProUGUI totalCostText;     // Görev bitince yazılacak final mesafe
+    public TextMeshProUGUI rmseText; // RMSE değerini ekranda göstermek için
+
     private float flownDistance = 0f;
     private Vector3 lastPosition;
     private float currentSpeed;
@@ -99,8 +104,7 @@ public class DroneNetworkManager : MonoBehaviour
     
     // currentRoute: Drone'un beynine yükleyeceğimiz "Uçuş Rotası". İçinde 3 boyutlu GPS koordinatları (Vector3) barındırır.
     private List<Vector3> currentRoute = new List<Vector3>(); 
-    private float targetTotalCost = 0f; // Python'dan gelen asıl skoru oyun sonu için aklımızda tutalım
-
+    
     // currentTargetIndex: Rota listesindeki kaçıncı şehre gittiğimizi aklımızda tuttuğumuz parmak hesabı (0, 1, 2...).
     private int currentTargetIndex = 0; 
 
@@ -111,8 +115,14 @@ public class DroneNetworkManager : MonoBehaviour
     public LineRenderer routeLine; // Çizgiyi çizecek alet
     public bool waitForInputToFly = true; // Boşluk tuşunu bekleyelim mi?
 
-    [Header("UI (Arayüz) Ayarları")]
-    public TextMeshProUGUI costText; // <-- Ekrana yazdıracağımız metin kutusu
+    [Header("UI (Arayüz) Ayarları - GAZ KOLU")]
+    public TextMeshProUGUI speedText; // Ekranda anlık "1.5x" yazması için (İsteğe bağlı)
+
+    // --- RMSE (CROSS-TRACK ERROR) DEĞİŞKENLERİ ---
+    private float cteSumOfSquares = 0f;
+    private int cteSampleCount = 0;
+    private Vector3 lastWaypoint; // Uçağın geldiği son şehir (Çizginin başlangıcı)
+
 
     [Header("Görsel Ayarlar")]
     public float cylinderHeight = 40f; // Silindirlerin varsayılan boyu
@@ -124,6 +134,8 @@ public class DroneNetworkManager : MonoBehaviour
     private bool isReplanning = false; // Python'dan cevap gelene kadar tekrar istek yollamayalım
     private float defaultDroneSpeed;
     private float evasionCooldown = 0f; // Kaçış manevrası sonrası sensörü kısa süreliğine kör eder
+
+    
 
     // --- 6. OYUN MOTORU METOTLARI ---
 
@@ -155,6 +167,7 @@ public class DroneNetworkManager : MonoBehaviour
                 Debug.Log("Motorlar ateşlendi, uçuş başladı!");
                 lastPosition = myDrone.position; // Kalkış noktasını kaydet
                 flownDistance = 0f;              // Taksimetreyi sıfırla
+                if (totalCostText != null) totalCostText.text = "Total Cost: 0.00m";
             }
             else
             {
@@ -168,6 +181,19 @@ public class DroneNetworkManager : MonoBehaviour
 
         // 2. HEDEFİ SEÇME: Listeden (currentRoute) sıradaki hedefimizin 3D koordinatlarını alıyoruz.
         Vector3 targetPosition = currentRoute[currentTargetIndex];
+        // --- RMSE (CROSS-TRACK ERROR) HESAPLAMASI ---
+        // Sadece X ve Z eksenlerinde (Kuşbakışı) rotadan ne kadar saptığımıza bakıyoruz
+        Vector2 currentPos2D = new Vector2(myDrone.position.x, myDrone.position.z);
+        Vector2 startPos2D = new Vector2(lastWaypoint.x, lastWaypoint.z);
+        Vector2 targetPos2D = new Vector2(targetPosition.x, targetPosition.z);
+
+        // Teorik rotaya olan dik (yanal) uzaklığımızı bul
+        float cte = CalculateCrossTrackError(currentPos2D, startPos2D, targetPos2D);
+        
+        // Hatanın karesini alıp toplam havuzuna ekle
+        cteSumOfSquares += (cte * cte);
+        cteSampleCount++;
+        // --------------------------------------------
         float targetSpeed = droneSpeed;
 
         // 3. HAREKET MATEMATİĞİ (En Önemli Kısım)
@@ -279,25 +305,42 @@ public class DroneNetworkManager : MonoBehaviour
                 RequestEmergencyPath(dangerousObstaclePoint);
             }
         }
-        // Eğer aramızdaki mesafe, bizim belirlediğimiz eşikten (0.5 metre) daha küçükse:
-        if (distanceToTarget < arrivalThreshold)
+       if (distanceToTarget < arrivalThreshold)
         {
-            Debug.Log($"Drone hedef {currentTargetIndex}'e ulaştı.Koordinat: {targetPosition} Sıradakine geçiliyor...");
-            
-            // Sıradaki hedefe geçmek için sayacı 1 artır. (Örn: 0. şehirden 1. şehre geç)
+            Debug.Log($"Drone hedef {currentTargetIndex}'e ulaştı...");
+            lastWaypoint = currentRoute[currentTargetIndex]; // RMSE: Yeni çizginin başlangıcını kaydet
             currentTargetIndex++; 
         }
         else if (distanceToTarget < 25f && tehlikeliEngelVar)
         {
-            Debug.LogWarning($"Hedef {currentTargetIndex} ulaşılamaz görünüyor. Engel nedeniyle atlanıyor.");
+            Debug.LogWarning($"Hedef {currentTargetIndex} ulaşılamaz görünüyor...");
+            lastWaypoint = currentRoute[currentTargetIndex]; // RMSE: Yeni çizginin başlangıcını kaydet
             currentTargetIndex++;
         }
 
         // Eğer sayacımız, rotadaki toplam şehir sayısına ulaştıysa veya geçtiyse, gidecek yol kalmamıştır.
+       // Eğer sayacımız, rotadaki toplam şehir sayısına ulaştıysa veya geçtiyse, gidecek yol kalmamıştır.
         if (currentTargetIndex >= currentRoute.Count)
         {
             isFlying = false; // Motorlar durur
             Debug.Log("GÖREV TAMAMLANDI! Drone tüm rotayı gezdi.");
+            
+            // --- EKLENEN TEK SATIR BURASI ---
+            if (totalCostText != null) totalCostText.text = "Total Cost: " + flownDistance.ToString("F2") + "m";
+            // --- FİNAL RMSE HESAPLAMASI ---
+            if (cteSampleCount > 0)
+            {
+                float mse = cteSumOfSquares / cteSampleCount; // Ortalama Kare Hata
+                float rmse = Mathf.Sqrt(mse);                 // Kökünü al (RMSE)
+                Debug.Log($"[MÜHENDİSLİK METRİĞİ] Yörünge Sapması (Cross-Track) RMSE: {rmse:F4} metre");
+
+                // --- EKRANA YAZDIRMA KISMI (YENİ) ---
+                if (rmseText != null)
+                {
+                    // Ekranda yeşil veya kırmızı renkli çıkması için HTML renk kodları bile kullanabilirsin.
+                    rmseText.text = "ε (RMSE): " + rmse.ToString("F2") + "m";
+                }
+            }
         }
     }
 
@@ -320,15 +363,8 @@ public class DroneNetworkManager : MonoBehaviour
         // Eğer çeviri başarılı olduysa ve içinde gerçekten şehirler (points) varsa:
         if (responseObj != null && responseObj.points != null)
         {
-            // Eğer ekranda bir metin kutusu seçiliyse, Cost değerini yazdır
-            if (costText != null)
-            {
-                // .ToString("F2") kısmı, sayının virgülden sonra sadece 2 hanesini gösterir (Örn: 7548.99)
-                costText.text = "Total Cost: " + responseObj.totalCost.ToString("F2") + "m";
-            }
             SpawnPoints(responseObj.points);         // Yerdeki silindirleri çiz.
-            targetTotalCost = responseObj.totalCost;
-            PrepareFlightRoute(responseObj.points, responseObj.totalCost);  // DÜZELTME: totalCost parametre olarak gönderiliyor.
+            PrepareFlightRoute(responseObj.points);  // DİKKAT: totalCost parametresini sildik!
         }
     }
 
@@ -380,7 +416,7 @@ public class DroneNetworkManager : MonoBehaviour
     }
 
     // DÜZELTME: Fonksiyona "float totalCost" parametresi eklendi.
-    void PrepareFlightRoute(List<PointData> orderedPoints, float totalCost)
+    void PrepareFlightRoute(List<PointData> orderedPoints)
     {
         // Eski bir uçuş planı varsa beyni temizle.
         currentRoute.Clear(); 
@@ -418,6 +454,8 @@ public class DroneNetworkManager : MonoBehaviour
                 }
             }
             myDrone.position = spawnPoint;
+            myDrone.position = spawnPoint;
+            lastWaypoint = spawnPoint; // RMSE: İlk çizgimizin başlangıç noktası
 
             myDrone.GetComponent<TrailRenderer>().Clear(); // Drone'un altından çıkan izlerin (Trail) temizlenmesi. Böylece önceki rotanın izleri yeni rotada görünmez.
             
@@ -439,6 +477,20 @@ public class DroneNetworkManager : MonoBehaviour
                 Debug.Log("Otonom Uçuş Başlatıldı!");
             }
             
+            // --- İŞTE YENİ EKLENEN KISIM: ESTIMATED COST (TAHMİNİ MESAFE) ---
+            float initialDistance = 0f;
+            for (int i = 0; i < currentRoute.Count - 1; i++) 
+            {
+                // Çizilen rotadaki her iki nokta arasındaki fiziksel mesafeyi toplar
+                initialDistance += Vector3.Distance(currentRoute[i], currentRoute[i + 1]);
+            }
+            
+            // UI Text'e yazdır (Eğer arayüze sürükleyip bıraktıysak)
+            if (estimatedCostText != null) 
+            {
+                estimatedCostText.text = "Estimated Cost: " + initialDistance.ToString("F2") + "m";
+            }
+            // -----------------------------------------------------------------
         }
     }
 
@@ -601,28 +653,16 @@ public class DroneNetworkManager : MonoBehaviour
         }
     }
 
-    // --- 10. SİMÜLASYON HIZ KONTROLÜ (UI BUTONLARI İÇİN) ---
-     public void SetSpeedSlow()
+    // Slider'dan gelen küsuratlı değeri (0.25 ile 4.0 arası) doğrudan oyun hızına eşitler.
+    public void SetSimulationSpeed(float newSpeed)
     {
-        Time.timeScale = 0.25f; // Yarı Hızlı
-        Debug.Log("Simülasyon Hızı: 0.25x (Yarı Hızlı)");
-    }
-    public void SetSpeedNormal()
-    {
-        Time.timeScale = 1f; // Normal Zaman
-        Debug.Log("Simülasyon Hızı: 1x (Normal)");
-    }
-
-    public void SetSpeedFast()
-    {
-        Time.timeScale = 2f; // 2 Kat Hızlı
-        Debug.Log("Simülasyon Hızı: 2x (Hızlı)");
-    }
-
-    public void SetSpeedVeryFast()
-    {
-        Time.timeScale = 4f; // 4 Kat Hızlı
-        Debug.Log("Simülasyon Hızı: 4x (Çok Hızlı)");
+        Time.timeScale = newSpeed;
+        
+        // Ekranda kaç X hızında olduğumuzu göstermek için:
+        if (speedText != null)
+        {
+            speedText.text = "Speed: " + newSpeed.ToString("F1") + "x";
+        }
     }
 
     // --- 11. SİLİNDİR BOYU KONTROLÜ (UI BUTONLARI İÇİN) ---
@@ -660,4 +700,20 @@ public class DroneNetworkManager : MonoBehaviour
             }
         }
     }
+
+    // Verilen bir noktanın, başlangıç ve bitişi belli olan bir çizgiye (rotaya) olan en kısa uzaklığını hesaplar.
+    private float CalculateCrossTrackError(Vector2 point, Vector2 lineStart, Vector2 lineEnd)
+    {
+        Vector2 lineDir = lineEnd - lineStart;
+        float lineLenSq = lineDir.sqrMagnitude;
+        if (lineLenSq == 0f) return Vector2.Distance(point, lineStart); // Eğer başlangıç ve bitiş aynıysa
+
+        // Noktanın çizgi üzerindeki iz düşümünü (projection) bulur
+        float t = Mathf.Clamp01(Vector2.Dot(point - lineStart, lineDir) / lineLenSq);
+        Vector2 projection = lineStart + t * lineDir;
+
+        // Gerçek konumumuz ile rotadaki ideal izdüşümümüz arasındaki mesafeyi döndürür
+        return Vector2.Distance(point, projection);
+    }
+
 }
