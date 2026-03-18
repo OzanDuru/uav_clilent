@@ -146,6 +146,10 @@ public class DroneNetworkManager : MonoBehaviour
     private float defaultDroneSpeed;
     private float evasionCooldown = 0f; // Kaçış manevrası sonrası sensörü kısa süreliğine kör eder
 
+    [Header("Görsel Ayarlar (Gece/Gündüz)")]
+    public Light sunLight; // Unity'deki Directional Light'ı (Güneş) buraya sürükleyeceğiz
+    private bool isDay = true; // Başlangıçta gündüz kabul ediyoruz
+
     
 
     // --- 6. OYUN MOTORU METOTLARI ---
@@ -753,6 +757,31 @@ public class DroneNetworkManager : MonoBehaviour
 
         // Gerçek konumumuz ile rotadaki ideal izdüşümümüz arasındaki mesafeyi döndürür
         return Vector2.Distance(point, projection);
+    }
+    // Butona tıklandığında anında Gece/Gündüz geçişi yapar
+    public void ToggleDayNight()
+    {
+        isDay = !isDay; // Durumu tersine çevir
+
+        if (sunLight != null)
+        {
+            if (isDay)
+            {
+                // GÜNDÜZ: Güneşi gökyüzüne tepeden vurdur (X açısı 50 derece)
+                sunLight.transform.rotation = Quaternion.Euler(50f, -30f, 0f);
+                sunLight.intensity = 1f; // Işık gücünü normale döndür
+            }
+            else
+            {
+                // GECE: Güneşi ufkun altına indir (X açısı -10 derece)
+                sunLight.transform.rotation = Quaternion.Euler(-10f, -30f, 0f);
+                sunLight.intensity = 0.1f; // Etraf zifiri karanlık olmasın diye hafif ay ışığı bırak
+            }
+        }
+        else
+        {
+            Debug.LogWarning("Güneş (sunLight) objesi DroneNetworkManager'a atanmamış!");
+        }
     }
 
 }
