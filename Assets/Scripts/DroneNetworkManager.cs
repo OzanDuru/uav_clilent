@@ -35,12 +35,20 @@ public class PointData
 }
 
 [Serializable]
+public class ObstacleData
+{
+    public float x;
+    public float z;
+    public float radius;
+}
+[Serializable]
 public class PathResponseMessage 
 { 
     public string type;            // Gelen mesajın tipi (Örn: "GLOBAL_PATH")
     public int mapSize;   
     public float totalCost;         // Haritanın boyutu
     public List<PointData> points; // İçinde birden fazla PointData (Şehir) barındıran tren katarı (Liste)
+    public List<ObstacleData> staticObstacles; // BİZE PYTHON'DAN GELECEK YENİ LİSTE: Haritadaki statik engellerin konum ve boyut bilgilerini içeren liste
 }
 
 [Serializable]
@@ -62,6 +70,8 @@ public class EmergencyReplanMessage
 }
 
 
+
+
 // --- 4. ANA OYUN SINIFI (Unity'deki Objemize Bağlanacak Olan Script) ---
 // MonoBehaviour: Unity'deki her script'in atasıdır. Bu sayede kodumuz Unity arayüzüne eklenebilir, Start ve Update gibi oyun motoru olaylarını dinleyebilir.
 public class DroneNetworkManager : MonoBehaviour
@@ -78,6 +88,7 @@ public class DroneNetworkManager : MonoBehaviour
     public GameObject cylinderPrefab; 
     public float yHeight = 0f;        // Şehirler gökyüzünde değil, tam zeminde (Y=0) dursun.
     public float uniformScale = 1f;   // Koordinatlar çok büyükse haritayı orantılı olarak küçültmek için kullanacağımız matematiksel çarpan.
+    public GameObject staticThreatPrefab; // Kırmızı Tehdit Silindiri
 
     [Header("Otonom Drone Ayarları")]
     // Transform: Bir objenin uzaydaki Konumunu, Dönüşünü ve Büyüklüğünü tutan kısımdır. Drone'un konumunu değiştireceğimiz için sadece Transform'unu alıyoruz.
@@ -361,10 +372,38 @@ public class DroneNetworkManager : MonoBehaviour
         var responseObj = JsonUtility.FromJson<PathResponseMessage>(jsonResponse);
         
         // Eğer çeviri başarılı olduysa ve içinde gerçekten şehirler (points) varsa:
+        // Eğer çeviri başarılı olduysa ve içinde gerçekten şehirler (points) varsa:
         if (responseObj != null && responseObj.points != null)
         {
-            SpawnPoints(responseObj.points);         // Yerdeki silindirleri çiz.
-            PrepareFlightRoute(responseObj.points);  // DİKKAT: totalCost parametresini sildik!
+            SpawnPoints(responseObj.points);         // Yerdeki mavi şehir silindirlerini çiz.
+            PrepareFlightRoute(responseObj.points);  // Rotayı uçağın beynine yükle.
+
+            // --- YENİ EKLENEN KISIM: SABİT TEHDİTLERİ (KIRMIZI SİLİNDİRLERİ) ÇİZ ---
+            if (responseObj.staticObstacles != null && staticThreatPrefab != null)
+            {
+                foreach (var obs in responseObj.staticObstacles)
+                {
+                    // 1. Python'dan gelen koordinatları Unity dünyasına oranla
+                    float worldX = obs.x * uniformScale;
+                    float worldZ = obs.z * uniformScale;
+
+                    // 2. Yüksekliği (Y) bulmak için tam o noktanın altındaki araziyi ölç
+                    float terrainY = Terrain.activeTerrain != null ? Terrain.activeTerrain.SampleHeight(new Vector3(worldX, 0f, worldZ)) : 0f;
+
+                    // 3. Obje Pozisyonunu ayarla (Silindir yarı yarıya yere gömülmesin diye biraz yukarı kaldırıyoruz)
+                    Vector3 spawnPos = new Vector3(worldX, terrainY + 50f, worldZ);
+
+                    // 4. Silindiri Yarat
+                    GameObject threatObj = Instantiate(staticThreatPrefab, spawnPos, Quaternion.identity);
+                    threatObj.name = "Tehlike_Bolgesi"; // Objeye isim ver
+
+                    // 5. Boyutlandır (Çap = Yarıçap * 2). 
+                    // Yüksekliğini (Y) 200 yapıyoruz ki gökyüzüne kadar uzanan devasa bir duvar olsun.
+                    float diameter = obs.radius * 2f * uniformScale;
+                    threatObj.transform.localScale = new Vector3(diameter, 200f, diameter);
+                }
+            }
+            // -----------------------------------------------------------------------
         }
     }
 
