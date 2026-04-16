@@ -151,6 +151,7 @@ public class DroneNetworkManager : MonoBehaviour
     private bool isDay = true; // Başlangıçta gündüz kabul ediyoruz
 
     
+    
 
     // --- 6. OYUN MOTORU METOTLARI ---
 
@@ -783,5 +784,7 @@ public class DroneNetworkManager : MonoBehaviour
             Debug.LogWarning("Güneş (sunLight) objesi DroneNetworkManager'a atanmamış!");
         }
     }
+
+    
 
 }
